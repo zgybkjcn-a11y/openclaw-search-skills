@@ -1,4 +1,4 @@
-![OpenClaw Search Skills Banner](../images/openclaw-search-skills-banner.png)
+![OpenClaw Search Skills Banner](../images/search-skills-banner.png)
 
 <div align="center">
 
@@ -6,7 +6,53 @@
 
 English | [简体中文](../README.md)
 
-**A production-ready set of OpenClaw Skills for multi-source search, thread pulling, and high-fidelity content extraction.**
+A Claude Code-compatible adaptation of the original OpenClaw search/content-extraction skills.
+
+## Claude Code compatibility
+
+This repository now includes a Claude Code plugin skeleton:
+
+- `.claude-plugin/plugin.json`
+- `skills/search-layer/SKILL.md`
+- `skills/content-extract/SKILL.md`
+- `skills/mineru-extract/SKILL.md`
+- `commands/search-layer.md`
+- `commands/content-extract.md`
+- `commands/mineru-extract.md`
+
+The Python scripts remain reusable outside Claude Code, but path discovery and output locations were updated to work without an OpenClaw workspace.
+
+## Quick install
+
+```bash
+cd ~
+git clone https://github.com/blessonism/openclaw-search-skills.git
+cd search-skills
+pip install requests trafilatura beautifulsoup4 lxml
+```
+
+Optional credentials file locations supported by the scripts:
+
+- `./credentials/search.json`
+- `~/.config/claude/search-skills/search.json`
+- `~/.claude/plugins/search-skills/credentials/search.json`
+- `~/.openclaw/credentials/search.json` (legacy compatibility)
+
+Environment variables are also supported:
+
+- `EXA_API_KEY`
+- `TAVILY_API_KEY`
+- `GROK_API_KEY`
+- `GROK_API_URL`
+- `GROK_MODEL`
+- `SEARCH_CREDENTIALS_PATH`
+- `MINERU_TOKEN`
+
+## Notes
+
+- Claude Code web tooling stays at the agent layer; the bundled Python scripts cannot directly invoke `WebSearch` or `WebFetch`.
+- `content-extract` is intended as a fallback after `WebFetch` fails or returns low-quality content.
+- `mineru-extract` now defaults to a cache/artifact directory under `~/.cache/claude-search-skills/` unless overridden.
 
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skills-0A84FF)](https://github.com/openclaw/openclaw)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -22,7 +68,7 @@ English | [简体中文](../README.md)
 
 ## 1. Overview
 
-`openclaw-search-skills` is a composable capability pack for [OpenClaw](https://github.com/openclaw/openclaw) agents. It covers the full workflow from **finding sources**, **pulling context**, and **extracting clean content** to **following citation chains**.
+`search-skills` is a composable capability pack for [OpenClaw](https://github.com/openclaw/openclaw) agents. It covers the full workflow from **finding sources**, **pulling context**, and **extracting clean content** to **following citation chains**.
 
 These skills were originally built as the foundation for [github-explorer](https://github.com/blessonism/github-explorer-skill). They were later split into a standalone repository because they became reusable across many workflows.
 
@@ -204,7 +250,7 @@ v2 borrowed ideas from [Anthropic knowledge-work-plugins](https://github.com/ant
 
 Just tell your OpenClaw agent:
 
-> Install this skill for me: https://github.com/blessonism/openclaw-search-skills
+> Install this skill for me: https://github.com/blessonism/search-skills
 
 ### Option 2: manual installation
 
@@ -212,14 +258,14 @@ Just tell your OpenClaw agent:
 # 1. Clone the repo anywhere you like
 mkdir -p ~/.openclaw/workspace/_repos
 git clone https://github.com/blessonism/openclaw-search-skills.git \
-  ~/.openclaw/workspace/_repos/openclaw-search-skills
+  ~/.openclaw/workspace/_repos/search-skills
 
 # 2. Symlink the skills into your skills directory
 cd ~/.openclaw/workspace/skills
 
-ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/search-layer search-layer
-ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/content-extract content-extract
-ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/mineru-extract mineru-extract
+ln -s ~/.openclaw/workspace/_repos/search-skills/search-layer search-layer
+ln -s ~/.openclaw/workspace/_repos/search-skills/content-extract content-extract
+ln -s ~/.openclaw/workspace/_repos/search-skills/mineru-extract mineru-extract
 ```
 
 > 💡 The skills directory may vary depending on how your OpenClaw setup was installed. Common locations are `~/.openclaw/workspace/skills/` and `~/.openclaw/skills/`.

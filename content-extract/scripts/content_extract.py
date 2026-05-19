@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""content-extract: deterministic MinerU-only extractor for OpenClaw.
+"""content-extract: deterministic MinerU-only extractor for Claude Code or OpenClaw.
 
 Why this exists:
-- OpenClaw's `web_fetch` is a tool, not available inside scripts.
-- This script provides a stable "fallback engine" that the agent can call
-  after probing with `web_fetch`.
+- Claude Code/OpenClaw `WebFetch`/`web_fetch` are tools, not available inside scripts.
+- This script provides a stable fallback engine that an agent or slash command can call
+  after probing a URL with WebFetch.
 
 It wraps mineru-extract's MCP-aligned script and returns a compact JSON contract.
 
@@ -40,24 +40,24 @@ def _error_output(source_url: str, notes: list[str]) -> dict:
 
 def _find_mineru_wrapper() -> str:
     """Locate mineru_parse_documents.py relative to this script or via env."""
-    # 1. Env override
     if v := os.environ.get("MINERU_WRAPPER_PATH"):
         return v
 
     here = pathlib.Path(__file__).resolve().parent
-    # 2. Monorepo sibling: ../mineru-extract/scripts/mineru_parse_documents.py
-    candidate = here.parent.parent / "mineru-extract" / "scripts" / "mineru_parse_documents.py"
-    if candidate.exists():
-        return str(candidate)
 
-    # 3. OpenClaw workspace default
-    default = pathlib.Path.home() / ".openclaw" / "workspace" / "skills" / "mineru-extract" / "scripts" / "mineru_parse_documents.py"
-    if default.exists():
-        return str(default)
+    candidates = [
+        here.parent.parent / "mineru-extract" / "scripts" / "mineru_parse_documents.py",
+        here.parent.parent / "skills" / "mineru-extract" / "scripts" / "mineru_parse_documents.py",
+        pathlib.Path.home() / ".claude" / "plugins" / "search-skills" / "mineru-extract" / "scripts" / "mineru_parse_documents.py",
+        pathlib.Path.home() / ".openclaw" / "workspace" / "skills" / "mineru-extract" / "scripts" / "mineru_parse_documents.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
 
     raise FileNotFoundError(
         "Cannot find mineru_parse_documents.py. "
-        "Set MINERU_WRAPPER_PATH env or install mineru-extract skill as a sibling directory."
+        "Set MINERU_WRAPPER_PATH, keep mineru-extract as a sibling directory, or install the Claude Code plugin with the bundled skills layout."
     )
 
 

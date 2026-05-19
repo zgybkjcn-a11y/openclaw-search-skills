@@ -1,4 +1,4 @@
-![OpenClaw Search Skills Banner](./images/openclaw-search-skills-banner.png)
+![OpenClaw Search Skills Banner](./images/search-skills-banner.png)
 
 <div align="center">
 
@@ -22,7 +22,7 @@
 
 ## 概述
 
-`openclaw-search-skills` 是一组面向 [OpenClaw](https://github.com/openclaw/openclaw) Agent 的可组合搜索能力集合，覆盖从 **找资料**、**抓上下文**、**提正文** 到 **追引用链** 的完整链路。
+`search-skills` 是一组面向 [OpenClaw](https://github.com/openclaw/openclaw) Agent 的可组合搜索能力集合，覆盖从 **找资料**、**抓上下文**、**提正文** 到 **追引用链** 的完整链路。
 
 ## 包含什么
 
@@ -168,29 +168,63 @@ Thread-pulling 能够让你稳定拿到的不是不只是一个链接，而是�
 
 ## 安装
 
-### 方式一：让 OpenClaw 帮你装（推荐 🚀）
-
-直接在对话里告诉你的 OpenClaw agent：
-
-> 帮我安装这个 skill：https://github.com/blessonism/openclaw-search-skills
-
-### 方式二：手动安装
+### Claude Code（推荐）
 
 ```bash
-# 1. Clone 到任意位置
-mkdir -p ~/.openclaw/workspace/_repos
-git clone https://github.com/blessonism/openclaw-search-skills.git \
-  ~/.openclaw/workspace/_repos/openclaw-search-skills
+# 1. clone 仓库
+cd ~
+git clone https://github.com/blessonism/openclaw-search-skills.git
 
-# 2. 链接到你的 skills 目录
-cd ~/.openclaw/workspace/skills
+# 2. 安装 Python 依赖
+pip install requests trafilatura beautifulsoup4 lxml
 
-ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/search-layer search-layer
-ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/content-extract content-extract
-ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/mineru-extract mineru-extract
+# 3. （可选）配置搜索凭据
+mkdir -p search-skills/credentials
+cat > search-skills/credentials/search.json <<'EOF'
+{
+  "exa": "your-exa-key",
+  "tavily": "your-tavily-key",
+  "grok": {
+    "apiUrl": "https://api.x.ai/v1",
+    "apiKey": "your-grok-key",
+    "model": "grok-4.1-fast"
+  }
+}
+EOF
+
+# 4. （可选）配置 MinerU
+cp search-skills/mineru-extract/.env.example search-skills/mineru-extract/.env
+# 编辑 .env，填入 MINERU_TOKEN
 ```
 
-> 💡 skills 目录因安装方式不同可能不同，常见的是 `~/.openclaw/workspace/skills/` 或 `~/.openclaw/skills/`。
+然后把该仓库作为 Claude Code 本地插件目录使用。当前仓库已包含：
+
+- `.claude-plugin/plugin.json`
+- `skills/*/SKILL.md`
+- `commands/search-layer.md`
+- `commands/content-extract.md`
+- `commands/mineru-extract.md`
+
+可直接手动验证：
+
+```bash
+python3 search-layer/scripts/search.py "RAG framework comparison" --mode deep --num 5
+python3 content-extract/scripts/content_extract.py --url "https://example.com"
+python3 mineru-extract/scripts/mineru_extract.py "https://example.com/paper.pdf" --print
+```
+
+### OpenClaw（兼容旧安装方式）
+
+```bash
+mkdir -p ~/.openclaw/workspace/_repos
+git clone https://github.com/blessonism/openclaw-search-skills.git \
+  ~/.openclaw/workspace/_repos/search-skills
+
+cd ~/.openclaw/workspace/skills
+ln -s ~/.openclaw/workspace/_repos/search-skills/search-layer search-layer
+ln -s ~/.openclaw/workspace/_repos/search-skills/content-extract content-extract
+ln -s ~/.openclaw/workspace/_repos/search-skills/mineru-extract mineru-extract
+```
 
 ---
 
@@ -200,7 +234,14 @@ ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/mineru-extract mineru-
 
 **方式一：Credentials 文件（推荐）**
 
-创建 `~/.openclaw/credentials/search.json`：
+可以使用以下任一位置：
+
+- `./credentials/search.json`（仓库内，适合 Claude Code 本地插件）
+- `~/.config/claude/search-skills/search.json`
+- `~/.claude/plugins/search-skills/credentials/search.json`
+- `~/.openclaw/credentials/search.json`（旧 OpenClaw 兼容）
+
+示例：
 
 ```json
 {
@@ -214,47 +255,25 @@ ln -s ~/.openclaw/workspace/_repos/openclaw-search-skills/mineru-extract mineru-
 }
 ```
 
-> 💡 Grok 配置可选。缺失时自动降级为 Exa + Tavily 双源。
-
-**方式二：环境变量（兼容）**
+**方式二：环境变量**
 
 ```bash
-export EXA_API_KEY="your-exa-key"        # https://exa.ai
-# 可选：自定义 Exa 端点（用于自建/代理 Exa）。二选一即可
-export EXA_API_BASE="https://exa.example.com"     # 会自动拼接 /search
+export EXA_API_KEY="your-exa-key"
+export EXA_API_BASE="https://exa.example.com"
 export EXA_API_URL="https://exa.example.com/search"
 
-export TAVILY_API_KEY="your-tavily-key"  # https://tavily.com
-export GROK_API_URL="https://api.x.ai/v1"  # 可选
-export GROK_API_KEY="your-grok-key"      # 可选
-export GROK_MODEL="grok-4.1-fast"        # 可选，默认 grok-4.1-fast
+export TAVILY_API_KEY="your-tavily-key"
+export GROK_API_URL="https://api.x.ai/v1"
+export GROK_API_KEY="your-grok-key"
+export GROK_MODEL="grok-4.1-fast"
+
+# 可选：显式指定 credentials 文件
+export SEARCH_CREDENTIALS_PATH="$PWD/credentials/search.json"
 ```
 
-环境变量会覆盖 credentials 文件中的同名配置。
-
-**可选：自定义 Exa API 端点（用于自建/代理 Exa）**
-
-默认 Exa 端点为 `https://api.exa.ai/search`。
-
-你可以通过以下任一方式覆盖：
-
-- 环境变量：`EXA_API_BASE="https://exa.example.com"`（自动拼接 `/search`）或 `EXA_API_URL="https://exa.example.com/search"`
-- Credentials：在 `~/.openclaw/credentials/search.json` 里增加一项，例如：
-
-```json
-{
-  "exa": "your-exa-key",
-  "exaApiBase": "https://exa.example.com"
-}
-```
-
-（也支持把 `exa` 写成对象：`{"exa": {"apiKey": "...", "apiUrl": "https://exa.example.com"}}`）
-
-Brave API Key 由 OpenClaw 内置的 `web_search` 工具管理，不需要在这里配置。
+Claude Code 的 WebSearch/WebFetch 不需要在这里配置 Brave key；那部分由 Claude Code 工具层处理。
 
 ### MinerU Token（可选，content-extract 需要）
-
-只有当你需要抓取微信/知乎/小红书等反爬站点时才需要：
 
 ```bash
 cp mineru-extract/.env.example mineru-extract/.env
@@ -264,11 +283,7 @@ cp mineru-extract/.env.example mineru-extract/.env
 ### Python 依赖
 
 ```bash
-# 基础依赖（search-layer v2.x）
-pip install requests
-
-# v3.0 链式追踪新增依赖
-pip install trafilatura beautifulsoup4 lxml
+pip install requests trafilatura beautifulsoup4 lxml
 ```
 
 ---

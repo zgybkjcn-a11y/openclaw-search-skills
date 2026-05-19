@@ -1,0 +1,17 @@
+{
+  "name": "search-skills",
+  "version": "0.1.0",
+  "description": "Claude Code-compatible search, content extraction, and MinerU parsing skills adapted from OpenClaw Search Skills.",
+  "author": {
+    "name": "blessonism"
+  },
+  "repository": "https://github.com/blessonism/openclaw-search-skills",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "search",
+    "web-research",
+    "mineru",
+    "content-extraction"
+  ]
+}

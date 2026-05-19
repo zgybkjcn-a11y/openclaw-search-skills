@@ -9,12 +9,13 @@ Goal: expose a stable, workflow-friendly interface similar to MinerU MCP's `pars
 - Return a JSON result contract on stdout.
 
 Notes
-- This is NOT an MCP server. It's a script meant to be called by OpenClaw skills via exec.
+- This is NOT an MCP server. It's a script meant to be called by Claude Code or OpenClaw skills/commands.
 - Secrets loaded from .env (skill root) or environment.
 
 Env
 - MINERU_TOKEN (required): bearer token
 - MINERU_API_BASE (optional): default https://mineru.net
+- MINERU_OUTPUT_ROOT (optional): artifact/cache root
 
 """
 
@@ -36,9 +37,15 @@ import zipfile
 
 def _default_workspace() -> pathlib.Path:
     """Return workspace root, preferring env override."""
+    if v := os.environ.get("MINERU_OUTPUT_ROOT"):
+        return pathlib.Path(v)
+    if v := os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        return pathlib.Path(v) / ".artifacts" / "mineru"
     if v := os.environ.get("OPENCLAW_WORKSPACE"):
         return pathlib.Path(v)
-    return pathlib.Path.home() / ".openclaw" / "workspace"
+    if v := os.environ.get("XDG_CACHE_HOME"):
+        return pathlib.Path(v) / "claude-search-skills" / "mineru-cache"
+    return pathlib.Path.home() / ".cache" / "claude-search-skills" / "mineru-cache"
 
 
 WORKSPACE = _default_workspace()
@@ -67,7 +74,7 @@ def _bootstrap_env() -> None:
 
 def _http_json(method: str, url: str, *, headers: dict[str, str] | None = None, payload: dict | None = None, timeout: int = 60) -> dict:
     data = None
-    hdrs = {"Accept": "application/json", "User-Agent": "openclaw-mineru"}
+    hdrs = {"Accept": "application/json", "User-Agent": "claude-search-skills-mineru"}
     if headers:
         hdrs.update(headers)
     if payload is not None:
@@ -91,7 +98,7 @@ def _http_json(method: str, url: str, *, headers: dict[str, str] | None = None, 
 
 
 def _http_bytes(url: str, *, headers: dict[str, str] | None = None, timeout: int = 180) -> bytes:
-    hdrs = {"User-Agent": "openclaw-mineru"}
+    hdrs = {"User-Agent": "claude-search-skills-mineru"}
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url=url, method="GET", headers=hdrs)

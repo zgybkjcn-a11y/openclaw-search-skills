@@ -31,16 +31,28 @@ from urllib.error import HTTPError
 # ---------------------------------------------------------------------------
 def _load_creds() -> dict:
     keys = {}
-    cred_path = Path.home() / ".openclaw" / "credentials" / "search.json"
-    try:
-        cred = json.loads(cred_path.read_text())
-        if grok := cred.get("grok"):
-            if isinstance(grok, dict):
-                keys["grok_url"] = grok.get("apiUrl", "")
-                keys["grok_key"] = grok.get("apiKey", "")
-                keys["grok_model"] = grok.get("model", "grok-4.1-fast")
-    except (json.JSONDecodeError, FileNotFoundError):
-        pass
+    candidates = [
+        os.environ.get("SEARCH_CREDENTIALS_PATH"),
+        str(Path(os.environ["CLAUDE_PLUGIN_ROOT"]) / "credentials" / "search.json") if os.environ.get("CLAUDE_PLUGIN_ROOT") else None,
+        str(Path.home() / ".claude" / "credentials" / "search.json"),
+        str(Path.home() / ".claude" / "plugins" / "search-skills" / "credentials" / "search.json"),
+        str(Path.home() / ".config" / "claude" / "search-skills" / "search.json"),
+        str(Path.home() / ".openclaw" / "credentials" / "search.json"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            cred = json.loads(Path(candidate).read_text())
+            if grok := cred.get("grok"):
+                if isinstance(grok, dict):
+                    keys["grok_url"] = grok.get("apiUrl", "")
+                    keys["grok_key"] = grok.get("apiKey", "")
+                    keys["grok_model"] = grok.get("model", "grok-4.1-fast")
+            if keys:
+                break
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass
     # Env var overrides
     for env, key in [("GROK_API_KEY", "grok_key"), ("GROK_API_URL", "grok_url"),
                      ("GROK_MODEL", "grok_model")]:

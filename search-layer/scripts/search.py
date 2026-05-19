@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Multi-source search v2.2: Exa + Tavily + Grok with intent-aware scoring and ranking.
-Brave is handled by the agent via built-in web_search (cannot be called from script).
+Brave is handled by the agent via built-in web search tools (cannot be called from script).
 
 Sources:
   Exa    - semantic search, good for technical/academic content
@@ -271,11 +271,16 @@ def score_result(result: dict, query: str, intent: str, boost_domains: set) -> f
 def _find_credentials() -> str | None:
     """Find search.json credentials file."""
     candidates = [
+        os.environ.get("SEARCH_CREDENTIALS_PATH"),
+        os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "credentials", "search.json") if os.environ.get("CLAUDE_PLUGIN_ROOT") else None,
+        os.path.expanduser("~/.claude/credentials/search.json"),
+        os.path.expanduser("~/.claude/plugins/search-skills/credentials/search.json"),
+        os.path.expanduser("~/.config/claude/search-skills/search.json"),
         os.path.expanduser("~/.openclaw/credentials/search.json"),
-        os.path.join(os.getcwd(), "credentials/search.json"),
+        os.path.join(os.getcwd(), "credentials", "search.json"),
     ]
     for c in candidates:
-        if os.path.isfile(c):
+        if c and os.path.isfile(c):
             return c
     return None
 

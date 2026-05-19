@@ -4,7 +4,7 @@
 Primary use: submit a URL (including HTML pages) to MinerU, poll until done,
 download the result zip, and extract Markdown.
 
-Designed to be called from OpenClaw skills via `exec`.
+Designed to be called from Claude Code or OpenClaw skills/commands.
 
 Env (load order):
 - process env
@@ -16,7 +16,8 @@ Required:
 
 Optional:
 - MINERU_API_BASE (default: https://mineru.net)
-- OPENCLAW_WORKSPACE: workspace root for output (default: ~/.openclaw/workspace)
+- MINERU_OUTPUT_ROOT: output root for extracted artifacts
+- OPENCLAW_WORKSPACE: legacy compatibility output root
 """
 
 from __future__ import annotations
@@ -55,9 +56,15 @@ def _bootstrap_env() -> None:
 
 
 def _default_workspace() -> pathlib.Path:
+    if v := os.environ.get("MINERU_OUTPUT_ROOT"):
+        return pathlib.Path(v)
+    if v := os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        return pathlib.Path(v) / ".artifacts" / "mineru"
     if v := os.environ.get("OPENCLAW_WORKSPACE"):
         return pathlib.Path(v)
-    return pathlib.Path.home() / ".openclaw" / "workspace"
+    if v := os.environ.get("XDG_CACHE_HOME"):
+        return pathlib.Path(v) / "claude-search-skills" / "mineru"
+    return pathlib.Path.home() / ".cache" / "claude-search-skills" / "mineru"
 
 
 def _http_json(method: str, url: str, *, headers: dict[str, str] | None = None, payload: dict | None = None, timeout: int = 60) -> dict:
@@ -209,7 +216,7 @@ def main() -> int:
     ap.add_argument("--page-ranges", default=None)
     ap.add_argument("--extra-formats", default=None, help='Comma-separated: docx,html,latex (md+json are default).')
 
-    ap.add_argument("--out", default=None, help="Output directory (default: workspace/mineru/<task_id>).")
+    ap.add_argument("--out", default=None, help="Output directory (default: MINERU_OUTPUT_ROOT/<task_id> or cache directory).")
     ap.add_argument("--print", dest="do_print", action="store_true", help="Print extracted markdown to stdout.")
     ap.add_argument("--max-chars", type=int, default=12000, help="When --print, max chars to print.")
 
