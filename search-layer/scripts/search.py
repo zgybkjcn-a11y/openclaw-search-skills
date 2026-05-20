@@ -34,6 +34,7 @@ from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
 from pathlib import Path
 import threading
 import importlib.util
+import itertools
 
 # Global concurrency limiter: cap total HTTP threads across nested pools.
 # Multi-query deep mode spawns outer_workers × 3 inner threads; this semaphore
@@ -308,9 +309,9 @@ def get_keys():
             if v := (cred.get("exaApiUrl") or cred.get("exaApiBase") or cred.get("exaBaseUrl")):
                 keys["exa_url"] = v
 
-            # Tavily
+            # Tavily — string 或 list[str]（多 key 轮询）
             if v := cred.get("tavily"):
-                keys["tavily"] = v
+                keys["tavily"] = [v] if isinstance(v, str) else list(v)
 
             # Grok
             if grok := cred.get("grok"):
@@ -327,7 +328,7 @@ def get_keys():
     if v := (os.environ.get("EXA_API_BASE") or os.environ.get("EXA_API_URL")):
         keys["exa_url"] = v
     if v := os.environ.get("TAVILY_API_KEY"):
-        keys["tavily"] = v
+        keys["tavily"] = [k.strip() for k in v.split(",") if k.strip()]
     if v := os.environ.get("GROK_API_KEY"):
         keys["grok_key"] = v
     if v := os.environ.get("GROK_API_URL"):
@@ -646,46 +647,71 @@ def search_exa(query: str, key: str, num: int = 5,
         return []
 
 
+# 模块级轮询游标：每次请求自增，分摊多 key 配额
+_tavily_cursor = itertools.count()
+
+
 @_throttled
-def search_tavily(query: str, key: str, num: int = 5,
+def search_tavily(query: str, keys: list, num: int = 5,
                    include_answer: bool = False,
                    freshness: str = None) -> dict:
-    """Returns {"results": [...], "answer": str|None}."""
-    try:
-        payload = {
-            "query": query,
-            "max_results": num,
-            "include_answer": include_answer,
-        }
-        # Tavily supports time-based filtering via topic + days
-        if freshness:
-            days_map = {"pd": 1, "pw": 7, "pm": 30, "py": 365}
-            if freshness in days_map:
-                payload["days"] = days_map[freshness]
-        r = requests.post(
-            "https://api.tavily.com/search",
-            headers={"Content-Type": "application/json"},
-            json={"api_key": key, **payload},
-            timeout=20,
-        )
-        r.raise_for_status()
-        data = r.json()
-        results = []
-        for res in data.get("results", []):
-            url = res.get("url")
-            if not url:
-                continue
-            results.append({
-                "title": res.get("title", ""),
-                "url": url,
-                "snippet": res.get("content", ""),
-                "published_date": res.get("published_date", ""),
-                "source": "tavily",
-            })
-        return {"results": results, "answer": data.get("answer")}
-    except Exception as e:
-        print(f"[tavily] error: {e}", file=sys.stderr)
+    """Returns {"results": [...], "answer": str|None}.
+    keys: list[str]，按 round-robin 选起点；单 key 失败（401/403/429/5xx/网络异常）自动切下一个。"""
+    if not keys:
         return {"results": [], "answer": None}
+    # 向后兼容：调用方误传 str 也接住
+    if isinstance(keys, str):
+        keys = [keys]
+
+    payload = {
+        "query": query,
+        "max_results": num,
+        "include_answer": include_answer,
+    }
+    # Tavily supports time-based filtering via topic + days
+    if freshness:
+        days_map = {"pd": 1, "pw": 7, "pm": 30, "py": 365}
+        if freshness in days_map:
+            payload["days"] = days_map[freshness]
+
+    start = next(_tavily_cursor) % len(keys)
+    order = [keys[(start + i) % len(keys)] for i in range(len(keys))]
+
+    last_err = None
+    for idx, key in enumerate(order):
+        try:
+            r = requests.post(
+                "https://api.tavily.com/search",
+                headers={"Content-Type": "application/json"},
+                json={"api_key": key, **payload},
+                timeout=20,
+            )
+            if r.status_code in (401, 403, 429) or r.status_code >= 500:
+                print(f"[tavily] key #{idx+1}/{len(order)} status {r.status_code}, trying next", file=sys.stderr)
+                last_err = f"HTTP {r.status_code}"
+                continue
+            r.raise_for_status()
+            data = r.json()
+            results = []
+            for res in data.get("results", []):
+                url = res.get("url")
+                if not url:
+                    continue
+                results.append({
+                    "title": res.get("title", ""),
+                    "url": url,
+                    "snippet": res.get("content", ""),
+                    "published_date": res.get("published_date", ""),
+                    "source": "tavily",
+                })
+            return {"results": results, "answer": data.get("answer")}
+        except Exception as e:
+            print(f"[tavily] key #{idx+1} error: {e}", file=sys.stderr)
+            last_err = str(e)
+            continue
+
+    print(f"[tavily] all {len(keys)} keys failed; last error: {last_err}", file=sys.stderr)
+    return {"results": [], "answer": None}
 
 
 # ---------------------------------------------------------------------------
