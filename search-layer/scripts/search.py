@@ -295,15 +295,19 @@ def get_keys():
             with open(cred_path) as f:
                 cred = json.load(f)
 
-            # Exa
+            # Exa — supports legacy single string OR list of keys (multi-key fallback)
             exa = cred.get("exa")
             if isinstance(exa, dict):
                 if v := exa.get("apiKey"):
-                    keys["exa"] = v
+                    keys["exa"] = [v]
+                if v := exa.get("apiKeys"):
+                    keys["exa"] = list(v) if isinstance(v, list) else [v]
                 if v := (exa.get("apiUrl") or exa.get("baseUrl") or exa.get("apiBase")):
                     keys["exa_url"] = v
+            elif isinstance(exa, list) and exa:
+                keys["exa"] = [k for k in exa if isinstance(k, str) and k]
             elif isinstance(exa, str) and exa:
-                keys["exa"] = exa
+                keys["exa"] = [exa]
 
             # Optional: explicit Exa base/url fields
             if v := (cred.get("exaApiUrl") or cred.get("exaApiBase") or cred.get("exaBaseUrl")):
@@ -322,9 +326,31 @@ def get_keys():
         except (json.JSONDecodeError, FileNotFoundError):
             pass
 
+    # 1b. Dedicated Exa multi-key pool (~/.claude/credentials/exa_keys.json)
+    #     Wins over `exa` in search.json so users can keep a single pool file shared
+    #     with the Exa MCP proxy.
+    exa_pool_path = Path.home() / ".claude/credentials/exa_keys.json"
+    if exa_pool_path.is_file():
+        try:
+            pool = json.loads(exa_pool_path.read_text())
+            pool_keys = pool.get("keys") if isinstance(pool, dict) else None
+            if isinstance(pool_keys, list):
+                filtered = [
+                    k.strip() for k in pool_keys
+                    if isinstance(k, str) and k.strip() and not k.strip().startswith("REPLACE")
+                ]
+                if filtered:
+                    keys["exa"] = filtered
+        except (json.JSONDecodeError, OSError):
+            pass
+
     # 2. Env vars (override / fallback for users without credentials file)
-    if v := os.environ.get("EXA_API_KEY"):
-        keys["exa"] = v
+    if v := os.environ.get("EXA_API_KEYS"):
+        env_keys = [k.strip() for k in v.split(",") if k.strip()]
+        if env_keys:
+            keys["exa"] = env_keys
+    elif v := os.environ.get("EXA_API_KEY"):
+        keys["exa"] = [v]
     if v := (os.environ.get("EXA_API_BASE") or os.environ.get("EXA_API_URL")):
         keys["exa_url"] = v
     if v := os.environ.get("TAVILY_API_KEY"):
@@ -591,60 +617,80 @@ def _resolve_exa_search_url(base_url: str | None = None) -> str:
 
 
 @_throttled
-def search_exa(query: str, key: str, num: int = 5,
+def search_exa(query: str, keys, num: int = 5,
                exa_type: str = "auto",
                freshness: str | None = None,
                with_highlights: bool = True,
                base_url: str | None = None) -> list:
-    """Exa search.
+    """Exa search with multi-key fallback.
+
+    keys: list[str]  — tries keys[0] first; on 401/403/429/5xx (or transport
+                       exception) falls back to keys[1], keys[2], ...
+                       A single string is accepted for backward compat.
 
     base_url can be either:
     - "https://api.exa.ai" (default)
     - "https://exa.example.com" (we will append /search)
     - "https://exa.example.com/search" (used as-is)
     """
-    try:
-        payload = {
-            "query": query,
-            "numResults": num,
-            "type": exa_type,
-        }
-        start_published_date = _exa_start_published_date(freshness)
-        if start_published_date:
-            payload["startPublishedDate"] = start_published_date
-        if with_highlights:
-            payload["contents"] = {
-                "highlights": {"maxCharacters": 1200}
-            }
-
-        exa_url = _resolve_exa_search_url(base_url)
-
-        r = requests.post(
-            exa_url,
-            headers={"x-api-key": key, "Content-Type": "application/json"},
-            json=payload,
-            timeout=20,
-        )
-        r.raise_for_status()
-        data = r.json()
-        resolved_search_type = data.get("resolvedSearchType", exa_type)
-        results = []
-        for res in data.get("results", []):
-            url = res.get("url")
-            if not url:
-                continue
-            results.append({
-                "title": res.get("title", ""),
-                "url": url,
-                "snippet": _extract_exa_snippet(res),
-                "published_date": res.get("publishedDate", ""),
-                "source": "exa",
-                "meta": {"exaType": resolved_search_type},
-            })
-        return results
-    except Exception as e:
-        print(f"[exa] error: {e}", file=sys.stderr)
+    if isinstance(keys, str):
+        keys = [keys]
+    keys = [k for k in (keys or []) if k]
+    if not keys:
         return []
+
+    payload = {
+        "query": query,
+        "numResults": num,
+        "type": exa_type,
+    }
+    start_published_date = _exa_start_published_date(freshness)
+    if start_published_date:
+        payload["startPublishedDate"] = start_published_date
+    if with_highlights:
+        payload["contents"] = {
+            "highlights": {"maxCharacters": 1200}
+        }
+
+    exa_url = _resolve_exa_search_url(base_url)
+
+    last_err = None
+    for idx, key in enumerate(keys):
+        try:
+            r = requests.post(
+                exa_url,
+                headers={"x-api-key": key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=20,
+            )
+            if r.status_code in (401, 403, 429) or r.status_code >= 500:
+                print(f"[exa] key #{idx+1}/{len(keys)} status {r.status_code}, trying next", file=sys.stderr)
+                last_err = f"HTTP {r.status_code}"
+                continue
+            r.raise_for_status()
+            data = r.json()
+            resolved_search_type = data.get("resolvedSearchType", exa_type)
+            results = []
+            for res in data.get("results", []):
+                url = res.get("url")
+                if not url:
+                    continue
+                results.append({
+                    "title": res.get("title", ""),
+                    "url": url,
+                    "snippet": _extract_exa_snippet(res),
+                    "published_date": res.get("publishedDate", ""),
+                    "source": "exa",
+                    "meta": {"exaType": resolved_search_type},
+                })
+            return results
+        except Exception as e:
+            print(f"[exa] key #{idx+1}/{len(keys)} error: {e}", file=sys.stderr)
+            last_err = str(e)
+            continue
+
+    print(f"[exa] all {len(keys)} keys failed; last error: {last_err}", file=sys.stderr)
+    return []
 
 
 # 模块级轮询游标：每次请求自增，分摊多 key 配额
@@ -821,9 +867,12 @@ def _coerce_research_content(value) -> str:
 
 @_throttled
 def _run_exa_research_light(query: str, queries: list[str], context: list[dict],
-                            key: str, freshness: str | None = None,
+                            keys, freshness: str | None = None,
                             base_url: str | None = None) -> dict | None:
     """Run Exa deep as a second-stage research lane.
+
+    keys: list[str] — multi-key fallback (same semantics as search_exa).
+                      A single string is accepted for backward compat.
 
     P1 intentionally keeps this light:
     - always type=deep
@@ -831,29 +880,53 @@ def _run_exa_research_light(query: str, queries: list[str], context: list[dict],
     - no outputSchema
     - does not replace normal results; only adds a research block
     """
+    if isinstance(keys, str):
+        keys = [keys]
+    keys = [k for k in (keys or []) if k]
+    if not keys:
+        return None
+
+    payload = {
+        "query": query or (queries[0] if queries else ""),
+        "numResults": max(3, min(5, len(context) or 5)),
+        "type": "deep",
+        "contents": {
+            "highlights": {"maxCharacters": 800}
+        },
+    }
+    start_published_date = _exa_start_published_date(freshness)
+    if start_published_date:
+        payload["startPublishedDate"] = start_published_date
+
+    exa_url = _resolve_exa_search_url(base_url)
+
+    last_err = None
+    data = None
+    for idx, key in enumerate(keys):
+        try:
+            r = requests.post(
+                exa_url,
+                headers={"x-api-key": key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=60,
+            )
+            if r.status_code in (401, 403, 429) or r.status_code >= 500:
+                print(f"[exa-research-light] key #{idx+1}/{len(keys)} status {r.status_code}, trying next", file=sys.stderr)
+                last_err = f"HTTP {r.status_code}"
+                continue
+            r.raise_for_status()
+            data = r.json()
+            break
+        except Exception as e:
+            print(f"[exa-research-light] key #{idx+1}/{len(keys)} error: {e}", file=sys.stderr)
+            last_err = str(e)
+            continue
+
+    if data is None:
+        print(f"[exa-research-light] all {len(keys)} keys failed; last error: {last_err}", file=sys.stderr)
+        return None
+
     try:
-        payload = {
-            "query": query or (queries[0] if queries else ""),
-            "numResults": max(3, min(5, len(context) or 5)),
-            "type": "deep",
-            "contents": {
-                "highlights": {"maxCharacters": 800}
-            },
-        }
-        start_published_date = _exa_start_published_date(freshness)
-        if start_published_date:
-            payload["startPublishedDate"] = start_published_date
-
-        exa_url = _resolve_exa_search_url(base_url)
-
-        r = requests.post(
-            exa_url,
-            headers={"x-api-key": key, "Content-Type": "application/json"},
-            json=payload,
-            timeout=60,
-        )
-        r.raise_for_status()
-        data = r.json()
         output = data.get("output") or {}
         synthesis = _coerce_research_content(output.get("content"))
         if not synthesis:
@@ -1156,7 +1229,7 @@ def main():
             query=queries[0] if queries else "",
             queries=queries,
             context=research_context,
-            key=keys["exa"],
+            keys=keys["exa"],
             freshness=args.freshness,
             base_url=keys.get("exa_url"),
         )
