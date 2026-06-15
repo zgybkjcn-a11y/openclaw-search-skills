@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Multi-source search v2.2: Exa + Tavily + Grok with intent-aware scoring and ranking.
+Multi-source search v2.3: Exa + Tavily + Grok + Firecrawl with intent-aware scoring and ranking.
 Brave is handled by the agent via built-in web search tools (cannot be called from script).
 
 Sources:
-  Exa    - semantic search, good for technical/academic content
-  Tavily - web search with AI answer, good for general/news content
-  Grok   - xAI model with strong real-time knowledge, via completions API
+  Exa       - semantic search, good for technical/academic content
+  Tavily    - web search with AI answer, good for general/news content
+  Grok      - xAI model with strong real-time knowledge, via completions API
+  Firecrawl - search + scrape in one call; good for page-body snippets/markdown
 
 Modes:
   fast   - Exa only (lightweight, low latency); falls back to Grok if no Exa key
-  deep   - Exa + Tavily + Grok parallel (max coverage)
+  deep   - Exa + Tavily + Grok + Firecrawl parallel (max coverage)
   answer - Tavily search (includes AI-generated answer with citations)
 
 Intent types (affect scoring weights):
@@ -37,7 +38,7 @@ import importlib.util
 import itertools
 
 # Global concurrency limiter: cap total HTTP threads across nested pools.
-# Multi-query deep mode spawns outer_workers × 3 inner threads; this semaphore
+# Multi-query deep mode spawns outer_workers × 4 inner threads; this semaphore
 # ensures the total never exceeds 8 regardless of nesting.
 _THREAD_SEMAPHORE = threading.Semaphore(8)
 
@@ -317,6 +318,20 @@ def get_keys():
             if v := cred.get("tavily"):
                 keys["tavily"] = [v] if isinstance(v, str) else list(v)
 
+            # Firecrawl
+            firecrawl = cred.get("firecrawl")
+            if isinstance(firecrawl, dict):
+                if v := firecrawl.get("apiKey"):
+                    keys["firecrawl"] = v
+                if v := (firecrawl.get("apiUrl") or firecrawl.get("baseUrl") or firecrawl.get("apiBase")):
+                    keys["firecrawl_url"] = v
+            elif isinstance(firecrawl, str) and firecrawl:
+                keys["firecrawl"] = firecrawl
+            if v := (cred.get("firecrawlApiKey") or cred.get("firecrawl_api_key")):
+                keys["firecrawl"] = v
+            if v := (cred.get("firecrawlApiUrl") or cred.get("firecrawlApiBase") or cred.get("firecrawlBaseUrl")):
+                keys["firecrawl_url"] = v
+
             # Grok
             if grok := cred.get("grok"):
                 if isinstance(grok, dict):
@@ -355,6 +370,10 @@ def get_keys():
         keys["exa_url"] = v
     if v := os.environ.get("TAVILY_API_KEY"):
         keys["tavily"] = [k.strip() for k in v.split(",") if k.strip()]
+    if v := os.environ.get("FIRECRAWL_API_KEY"):
+        keys["firecrawl"] = v
+    if v := (os.environ.get("FIRECRAWL_API_BASE") or os.environ.get("FIRECRAWL_API_URL")):
+        keys["firecrawl_url"] = v
     if v := os.environ.get("GROK_API_KEY"):
         keys["grok_key"] = v
     if v := os.environ.get("GROK_API_URL"):
@@ -384,9 +403,10 @@ def normalize_url(url: str) -> str:
 # ---------------------------------------------------------------------------
 @_throttled
 def search_grok(query: str, api_url: str, api_key: str, model: str = "grok-4.1-fast",
-                num: int = 5, freshness: str = None) -> list:
+                num: int = 5, freshness: str = None, max_retries: int = 2) -> list:
     """Use Grok model via completions API as a search source.
-    Grok has strong real-time knowledge; we ask it to return structured results."""
+    Grok has strong real-time knowledge; we ask it to return structured results.
+    max_retries is accepted for API compatibility with enhanced callers."""
     try:
         # Time context injection for time-sensitive queries
         time_keywords_cn = ["当前", "现在", "今天", "最新", "最近", "近期", "实时", "目前", "本周", "本月", "今年"]
@@ -760,6 +780,149 @@ def search_tavily(query: str, keys: list, num: int = 5,
     return {"results": [], "answer": None}
 
 
+def _resolve_firecrawl_search_url(base_url: str | None = None) -> str:
+    """Resolve configurable Firecrawl endpoint to the concrete /v2/search URL."""
+    parsed = urlparse((base_url or "https://api.firecrawl.dev").rstrip("/"))
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/search"):
+        if path.endswith("/v2"):
+            path = f"{path}/search"
+        elif path:
+            path = f"{path}/v2/search"
+        else:
+            path = "/v2/search"
+    return urlunparse(parsed._replace(path=path))
+
+
+def _resolve_firecrawl_scrape_url(base_url: str | None = None) -> str:
+    """Resolve configurable Firecrawl endpoint to the concrete /v2/scrape URL."""
+    parsed = urlparse((base_url or "https://api.firecrawl.dev").rstrip("/"))
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/scrape"):
+        if path.endswith("/v2"):
+            path = f"{path}/scrape"
+        elif path:
+            path = f"{path}/v2/scrape"
+        else:
+            path = "/v2/scrape"
+    return urlunparse(parsed._replace(path=path))
+
+
+def _firecrawl_tbs_for_freshness(freshness: str | None) -> str | None:
+    """Map pd/pw/pm/py freshness to Google-style tbs values accepted by Firecrawl."""
+    return {"pd": "qdr:d", "pw": "qdr:w", "pm": "qdr:m", "py": "qdr:y"}.get(freshness or "")
+
+
+def _extract_firecrawl_snippet(res: dict) -> str:
+    """Prefer page-body formats returned by Firecrawl, then fall back to descriptions."""
+    for key in ("markdown", "content", "text", "description", "snippet"):
+        value = res.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:2000]
+    return ""
+
+
+@_throttled
+def search_firecrawl(query: str, key: str, num: int = 5,
+                     freshness: str | None = None,
+                     base_url: str | None = None,
+                     scrape: bool = True) -> list:
+    """Firecrawl /v2/search: search results, optionally with scraped markdown content."""
+    try:
+        payload = {"query": query, "limit": num}
+        tbs = _firecrawl_tbs_for_freshness(freshness)
+        if tbs:
+            payload["tbs"] = tbs
+        if scrape:
+            payload["scrapeOptions"] = {"formats": ["markdown"]}
+
+        r = requests.post(
+            _resolve_firecrawl_search_url(base_url),
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=35,
+        )
+        r.raise_for_status()
+        data = r.json()
+        raw_results = data.get("data") or data.get("results") or []
+        if isinstance(raw_results, dict):
+            grouped = []
+            for value in raw_results.values():
+                if isinstance(value, list):
+                    grouped.extend(value)
+            raw_results = grouped
+        results = []
+        for res in raw_results:
+            if not isinstance(res, dict):
+                continue
+            url = res.get("url") or res.get("link")
+            if not url:
+                continue
+            results.append({
+                "title": res.get("title", ""),
+                "url": url,
+                "snippet": _extract_firecrawl_snippet(res),
+                "published_date": res.get("publishedDate") or res.get("published_date") or res.get("date", ""),
+                "source": "firecrawl",
+            })
+        return results
+    except Exception as e:
+        print(f"[firecrawl] error: {e}", file=sys.stderr)
+        return []
+
+
+def _extract_scrape_markdown(data: dict) -> str:
+    for key in ("markdown", "content", "text"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        for key in ("markdown", "content", "text"):
+            value = inner.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def enrich_results_with_firecrawl(results: list, keys: dict, top: int = 3, max_chars: int = 4000) -> None:
+    """Scrape top-ranked results via Firecrawl and attach markdown excerpts in-place."""
+    firecrawl_key = keys.get("firecrawl")
+    if not firecrawl_key or not results or top <= 0:
+        return
+
+    scrape_url = _resolve_firecrawl_scrape_url(keys.get("firecrawl_url"))
+    headers = {
+        "Authorization": f"Bearer {firecrawl_key}",
+        "Content-Type": "application/json",
+    }
+
+    for result in results[:top]:
+        url = result.get("url")
+        if not url:
+            continue
+        try:
+            r = requests.post(
+                scrape_url,
+                headers=headers,
+                json={"url": url, "formats": ["markdown"]},
+                timeout=35,
+            )
+            r.raise_for_status()
+            markdown = _extract_scrape_markdown(r.json())
+            if markdown:
+                result["content"] = markdown[:max_chars]
+                result["enriched"] = True
+                src = result.get("source", "")
+                if "firecrawl-enrich" not in src:
+                    result["source"] = f"{src}, firecrawl-enrich" if src else "firecrawl-enrich"
+        except Exception as e:
+            print(f"[firecrawl-enrich] {url}: {e}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Dedup
 # ---------------------------------------------------------------------------
@@ -976,9 +1139,10 @@ def execute_search(query: str, mode: str, keys: dict, num: int,
                    include_answer: bool = False,
                    freshness: str = None,
                    sources: set = None,
-                   intent: str | None = None) -> tuple:
+                   intent: str | None = None,
+                   max_grok_retries: int = 2) -> tuple:
     """Execute search for a single query. Returns (results_list, answer_text).
-    If sources is set, only run those sources (e.g. {'grok', 'exa', 'tavily'})."""
+    If sources is set, only run those sources (e.g. {'grok', 'exa', 'tavily', 'firecrawl'})."""
     all_results = []
     answer_text = None
 
@@ -1004,13 +1168,13 @@ def execute_search(query: str, mode: str, keys: dict, num: int,
                 base_url=keys.get("exa_url"),
             )
         elif has_grok and _want("grok"):
-            all_results = search_grok(query, grok_url, grok_key, grok_model, num, freshness)
+            all_results = search_grok(query, grok_url, grok_key, grok_model, num, freshness, max_grok_retries)
         else:
             print('{"warning": "No API keys found for fast mode"}',
                   file=sys.stderr)
 
     elif mode == "deep":
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             futures = {}
             if "exa" in keys and _want("exa"):
                 futures[pool.submit(
@@ -1028,7 +1192,14 @@ def execute_search(query: str, mode: str, keys: dict, num: int,
                     freshness=freshness)] = "tavily"
             if has_grok and _want("grok"):
                 futures[pool.submit(
-                    search_grok, query, grok_url, grok_key, grok_model, num, freshness)] = "grok"
+                    search_grok, query, grok_url, grok_key, grok_model, num, freshness,
+                    max_grok_retries)] = "grok"
+            if "firecrawl" in keys and _want("firecrawl"):
+                futures[pool.submit(
+                    search_firecrawl, query, keys["firecrawl"], num,
+                    freshness=freshness,
+                    base_url=keys.get("firecrawl_url"),
+                    scrape=True)] = "firecrawl"
             for fut in concurrent.futures.as_completed(futures):
                 name = futures[fut]
                 try:
@@ -1109,12 +1280,12 @@ def _run_extract_refs(urls: list) -> list:
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(
-        description="Multi-source search v2 (Exa + Tavily) with intent-aware scoring")
+        description="Multi-source search v2.3 (Exa + Tavily + Grok + Firecrawl) with intent-aware scoring")
     ap.add_argument("query", nargs="?", default=None, help="Search query (single)")
     ap.add_argument("--queries", nargs="+", default=None,
                     help="Multiple queries to execute in parallel")
     ap.add_argument("--mode", choices=["fast", "deep", "answer"], default="deep",
-                    help="fast=Exa only | deep=Exa+Tavily | answer=Tavily with AI answer")
+                    help="fast=Exa only | deep=Exa+Tavily+Grok+Firecrawl | answer=Tavily with AI answer")
     ap.add_argument("--num", type=int, default=5,
                     help="Results per source per query (default 5)")
     ap.add_argument("--intent",
@@ -1127,11 +1298,15 @@ def main():
     ap.add_argument("--domain-boost", default=None,
                     help="Comma-separated domains to boost in scoring")
     ap.add_argument("--source", default=None,
-                    help="Comma-separated sources to use (exa,tavily,grok). Default: all available")
+                    help="Comma-separated sources to use (exa,tavily,grok,firecrawl). Default: all available")
     ap.add_argument("--extract-refs", action="store_true",
                     help="After search, fetch each result URL and extract structured references")
     ap.add_argument("--extract-refs-urls", nargs="+", default=None,
                     help="Extract refs from these URLs directly (skip search)")
+    ap.add_argument("--enrich-top", type=int, default=0,
+                    help="After ranking, scrape Top N URLs via Firecrawl and attach content (default: 0 = off)")
+    ap.add_argument("--enrich-max-chars", type=int, default=4000,
+                    help="Max characters per enriched content excerpt (default 4000)")
     args = ap.parse_args()
 
     # Determine queries
@@ -1235,6 +1410,27 @@ def main():
         )
         if research:
             output["research"] = research
+
+    # Firecrawl content enrichment for top N results
+    if args.enrich_top and "firecrawl" in keys:
+        enrich_results_with_firecrawl(
+            deduped,
+            keys,
+            top=args.enrich_top,
+            max_chars=args.enrich_max_chars,
+        )
+        output["enrich"] = {
+            "top": args.enrich_top,
+            "max_chars": args.enrich_max_chars,
+            "enriched": sum(1 for r in deduped if r.get("enriched")),
+            "source": "firecrawl-scrape",
+        }
+    elif args.enrich_top and "firecrawl" not in keys:
+        output["enrich"] = {
+            "top": args.enrich_top,
+            "enriched": 0,
+            "warning": "firecrawl key not configured; skipped enrichment",
+        }
 
     # --extract-refs: extract references from result URLs or explicit URL list
     if args.extract_refs or args.extract_refs_urls:
