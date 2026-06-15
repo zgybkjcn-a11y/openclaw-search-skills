@@ -31,6 +31,21 @@
 > If you are looking for the **current packaged deep-search release line** used in practice, refer to:
 >
 > `zgybkjcn-a11y/deep-search-research-skills`
+>
+> **Repository map / 仓库关系图**
+>
+> ```text
+> blessonism/openclaw-search-skills (upstream)
+>                 │
+>                 └── zgybkjcn-a11y/openclaw-search-skills
+>                     (this repo: upstream fork / experiment line)
+>
+> zgybkjcn-a11y/deep-search-research-skills
+> (primary packaged release line)
+>                 │
+>                 └── local runtime ~/.openclaw/skills/search-layer
+>                     (actual in-use version, may include local environment adaptations)
+> ```
 
 ---
 
