@@ -18,6 +18,20 @@
 
 > 📦 本仓库已收录至 [openclaw-skills](https://github.com/blessonism/openclaw-skills)（聚合仓库，包含更多 Skills）。推荐 Star 聚合仓库以获取全部更新。
 
+> **Repository role / 仓库定位**
+>
+> This repository is primarily used as an **upstream fork and experiment line** for `openclaw-search-skills`.
+>
+> It is useful for:
+>
+> - tracking upstream changes from `blessonism/openclaw-search-skills`
+> - maintaining adaptation branches
+> - testing incremental `search-layer` improvements
+>
+> If you are looking for the **current packaged deep-search release line** used in practice, refer to:
+>
+> `zgybkjcn-a11y/deep-search-research-skills`
+
 ---
 
 ## 概述
