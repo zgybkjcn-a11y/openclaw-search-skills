@@ -271,19 +271,33 @@ def score_result(result: dict, query: str, intent: str, boost_domains: set) -> f
 # API key loading
 # ---------------------------------------------------------------------------
 def _find_credentials() -> str | None:
-    """Find search.json credentials file."""
+    """Find search.json credentials file.
+
+    Prefer OpenClaw / package-local locations first so runtime skills can see
+    Firecrawl and other OpenClaw-specific config, while still remaining
+    compatible with Claude-style plugin layouts.
+    """
+    script_dir = Path(__file__).resolve().parent
     candidates = [
+        os.environ.get("SEARCH_LAYER_CREDENTIALS"),
+        os.environ.get("OPENCLAW_SEARCH_CREDENTIALS"),
+        os.path.join(os.environ.get("OPENCLAW_CREDENTIALS_DIR", ""), "search.json") if os.environ.get("OPENCLAW_CREDENTIALS_DIR") else None,
         os.environ.get("SEARCH_CREDENTIALS_PATH"),
+        script_dir.parent / "credentials" / "search.json",
+        script_dir.parents[2] / "credentials" / "search.json",
+        os.path.join(os.getcwd(), "credentials", "search.json"),
+        os.path.expanduser("~/.openclaw/credentials/search.json"),
         os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "credentials", "search.json") if os.environ.get("CLAUDE_PLUGIN_ROOT") else None,
         os.path.expanduser("~/.claude/credentials/search.json"),
         os.path.expanduser("~/.claude/plugins/search-skills/credentials/search.json"),
         os.path.expanduser("~/.config/claude/search-skills/search.json"),
-        os.path.expanduser("~/.openclaw/credentials/search.json"),
-        os.path.join(os.getcwd(), "credentials", "search.json"),
     ]
     for c in candidates:
-        if c and os.path.isfile(c):
-            return c
+        if not c:
+            continue
+        p = Path(c).expanduser()
+        if p.is_file():
+            return str(p)
     return None
 
 
